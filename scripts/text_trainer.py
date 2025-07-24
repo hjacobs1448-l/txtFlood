@@ -11,17 +11,17 @@ import shutil
 import subprocess
 import sys
 import uuid
-from datetime import datetime, timezone, timedelta
-
+import re
 import yaml
 from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM
 
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(script_dir)
 sys.path.append(project_root)
 
-import train_cst
+import trainer.constants as train_cst
 from core.config.config_handler import create_dataset_entry
 from core.config.config_handler import save_config
 from core.config.config_handler import update_flash_attention
@@ -32,41 +32,7 @@ from core.models.utility_models import FileFormat
 from core.models.utility_models import GrpoDatasetType
 from core.models.utility_models import InstructTextDatasetType
 from core.models.utility_models import TaskType
-
-from axolotl.train import Trainer
-from transformers import TrainerCallback
-from customized_trainer import WhenToEvalHandler, CustomEvalSaveCallback, GRPOCustomEvalSaveCallback
-
-from axolotl.utils.dict import DictDefault
-from axolotl.common.datasets import load_datasets
-import training_paths as train_paths
-from customized_config import customize_config, INSTRUCT, DPO, GRPO
-
-CONFIG_DIR = "core/config/"
-
-def create_reward_funcs_file(reward_funcs: list[str], task_id: str, destination_dir: str = CONFIG_DIR) -> list[str]:
-    """
-    Create a Python file with reward functions for GRPO training.
-
-    Args:
-        reward_funcs: List of strings containing Python reward function implementations
-        task_id: Unique task identifier
-    """
-    filename = f"rewards_{task_id}"
-    filepath = os.path.join(destination_dir, f"{filename}.py")
-
-    func_names = []
-    for reward_func in reward_funcs:
-        if "def " in reward_func:
-            func_name = reward_func.split("def ")[1].split("(")[0].strip()
-            func_names.append(func_name)
-
-    with open(filepath, "w") as f:
-        f.write("# Auto-generated reward functions file\n\n")
-        for reward_func in reward_funcs:
-            f.write(f"{reward_func}\n\n")
-
-    return filename, func_names
+from miner.logic.job_handler import create_reward_funcs_file
 
 
 def patch_model_metadata(output_dir: str, base_model_id: str):
@@ -111,31 +77,109 @@ def patch_model_metadata(output_dir: str, base_model_id: str):
         pass
 
 
+def copy_dataset_if_needed(dataset_path, file_format):
+    """Copy dataset to Axolotl directories for non-HF datasets."""
+    if file_format != FileFormat.HF.value:
+        dataset_filename = os.path.basename(dataset_path)
 
-def copy_dataset_to_axolotl_directories(dataset_path):
-    dataset_filename = os.path.basename(dataset_path)
-    data_path, root_path = train_paths.get_axolotl_dataset_paths(dataset_filename)
-    shutil.copy(dataset_path, data_path)
-    shutil.copy(dataset_path, root_path)
+        os.makedirs("/workspace/axolotl/data", exist_ok=True)
+        os.makedirs("/workspace/axolotl", exist_ok=True)
 
-    return data_path
+        data_path = f"/workspace/axolotl/data/{dataset_filename}"
+        root_path = f"/workspace/axolotl/{dataset_filename}"
 
+        shutil.copy(dataset_path, data_path)
+        shutil.copy(dataset_path, root_path)
 
-def get_data_size(dataset_path):
-    with open(dataset_path, "r") as f:
-        data = json.load(f)
-    return len(data)
+        return data_path
+    return dataset_path
 
 
-def create_config(task_id, model, dataset, dataset_type, file_format, output_dir, data_size, hours_to_complete, expected_repo_name=None,
+def get_gpu_count():
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, check=True
+        )
+        gpus = result.stdout.strip().split('\n')
+        return len(gpus)
+    except Exception as e:
+        return 0
+
+
+KNOWN_MODEL_PARAMS = {
+    "tinyllama_v1.1": 1_100_000_000,
+}
+
+def parse_param_count_from_name(model_name: str):
+    if not isinstance(model_name, str):
+        return None
+
+    for key, val in KNOWN_MODEL_PARAMS.items():
+        if key.lower() in model_name.lower():
+            return val
+
+    m = re.search(r'(?i)(\d+(?:\.\d+)?)\s*([mMbB])\b', model_name)
+    if not m:
+        return None
+
+    number_str, unit = m.group(1), m.group(2).upper()
+    try:
+        number = float(number_str)
+    except ValueError:
+        return None
+
+    if unit.lower() == 'm':
+        return int(number * 1_000_000)
+    elif unit.lower() == 'b':
+        return int(number * 1_000_000_000)
+    else:
+        return None
+
+def get_batch_size_by_model_size(model_name: str) -> int:
+    count = parse_param_count_from_name(model_name)
+    if count == None:
+        return None
+
+    params_in_billion = count / 1_000_000_000
+    if params_in_billion <= 0.5:
+        base_batch_size = 16
+    elif params_in_billion <= 1.6:
+        base_batch_size = 12
+    elif params_in_billion <= 7.1:
+        base_batch_size = 8
+    elif params_in_billion <= 9.1:
+        base_batch_size = 4
+    elif params_in_billion <= 14.1:
+        base_batch_size = 2
+    else:
+        base_batch_size = 1
+
+    if 'qwen' in model_name.lower():
+        base_batch_size = max(1, base_batch_size / 2)
+
+    return base_batch_size
+
+
+def get_learning_rate_by_batch_and_gpu(batch_size: int, gpu_count: int, base_learning_rate: float = 0.00008) -> float:
+    base_gpu_count = 8
+    base_batch_size = 8
+    
+    effective_batch_size = batch_size * gpu_count
+    base_effective_batch_size = base_batch_size * base_gpu_count
+
+    adjusted_learning_rate = base_learning_rate * (effective_batch_size / base_effective_batch_size)
+    
+    return adjusted_learning_rate
+
+
+def create_config(task_id, model, dataset, dataset_type, file_format, output_dir, expected_repo_name=None,
                 huggingface_username=None, huggingface_token=None, disable_upload=True):
     """Create the axolotl config file with appropriate settings."""
-    dev_size = 200
     if isinstance(dataset_type, InstructTextDatasetType | DpoDatasetType):
-        config_path = "/workspace/axolotl/scripts/yml_config/base.yml"
+        config_path = "/workspace/axolotl/base.yml"
     elif isinstance(dataset_type, GrpoDatasetType):
-        dev_size = 100 # as this is extremely slow now 
-        config_path = "/workspace/axolotl/scripts/yml_config/base_grpo.yml"
+        config_path = "/workspace/axolotl/base_grpo.yml"
     else:
         raise ValueError(f"Unsupported dataset type: {type(dataset_type)}")
 
@@ -143,14 +187,13 @@ def create_config(task_id, model, dataset, dataset_type, file_format, output_dir
         config = yaml.safe_load(file)
 
     config["datasets"] = [create_dataset_entry(dataset, dataset_type, FileFormat(file_format))]
-    model_path = str(train_paths.get_text_base_model_path(model))
+    model_path = f"{train_cst.CACHE_PATH}/models/{model.replace('/', '--')}"
     config["base_model"] = model_path
     config["mlflow_experiment_name"] = dataset
     os.makedirs(output_dir, exist_ok=True)
     config["output_dir"] = output_dir
 
-    # config = update_flash_attention(config, model)
-    
+    config = update_flash_attention(config, model)
 
     if isinstance(dataset_type, DpoDatasetType):
         config["rl"] = "dpo"
@@ -184,22 +227,69 @@ def create_config(task_id, model, dataset, dataset_type, file_format, output_dir
             if "path" in ds:
                 ds["path"] = "/workspace/axolotl/data"
 
-            ds["data_files"] = [dataset] #[os.path.basename(dataset)]
+            ds["data_files"] = [os.path.basename(dataset)]
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         config["special_tokens"] = {"pad_token": tokenizer.eos_token}
+        
+    gpu_count = get_gpu_count()
+    if gpu_count > 1:
+        config["deepspeed"] = "zero2.json"
+    batch_size = get_batch_size_by_model_size(model)
+    if batch_size:
+        config["micro_batch_size"] = batch_size
+        config["learning_rate"] = get_learning_rate_by_batch_and_gpu(batch_size, gpu_count, config["base_learning_rate"])
 
     config_path = os.path.join("/workspace/axolotl/configs", f"{task_id}.yml")
-    
-    task_type = DPO if isinstance(dataset_type, DpoDatasetType) else GRPO if isinstance(dataset_type, GrpoDatasetType) else INSTRUCT
-    customize_config(config, task_type, model_path, model, hours_to_complete)
-    config["val_set_size"] = dev_size / data_size
     save_config(config, config_path)
     return config_path
 
 
-def main():
+def run_training(config_path):
+    print(f"Starting training with config: {config_path}", flush=True)
+    """Run the training process using the specified config file."""
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+
+    training_env = os.environ.copy()
+    training_env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+    training_env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
+    training_command = [
+    "accelerate", "launch",
+    "-m", "axolotl.cli.train",
+    config_path
+    ]
+
+    try:
+        print("Starting training subprocess...\n", flush=True)
+        process = subprocess.Popen(
+            training_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        for line in process.stdout:
+            print(line, end="", flush=True)
+
+        return_code = process.wait()
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, training_command)
+
+        print("Training subprocess completed successfully.", flush=True)
+
+    except subprocess.CalledProcessError as e:
+        print("Training subprocess failed!", flush=True)
+        print(f"Exit Code: {e.returncode}", flush=True)
+        print(f"Command: {' '.join(e.cmd) if isinstance(e.cmd, list) else e.cmd}", flush=True)
+        raise RuntimeError(f"Training subprocess failed with exit code {e.returncode}")
+
+
+
+async def main():
     print("---STARTING TEXT TRAINING SCRIPT---", flush=True)
     parser = argparse.ArgumentParser(description="Text Model Training Script")
     parser.add_argument("--task-id", required=True, help="Task ID")
@@ -211,10 +301,15 @@ def main():
     parser.add_argument("--hours-to-complete", type=float, required=True, help="Number of hours to complete the task")
     parser.add_argument("--expected-repo-name", help="Expected repository name")
     args = parser.parse_args()
-    original_model_name = args.model
-    original_task_type = args.task_type
 
-    for directory in train_cst.AXOLOTL_DIRECTORIES.values():
+    for directory in [
+        "/workspace/axolotl/data",
+        "/workspace/axolotl/data_prepared",
+        "/workspace/axolotl/configs",
+        "/workspace/axolotl/outputs",
+        "/workspace/input_data",
+        "/workspace/axolotl"
+    ]:
         os.makedirs(directory, exist_ok=True)
     try:
         dataset_type_dict = json.loads(args.dataset_type)
@@ -230,27 +325,18 @@ def main():
     except Exception as e:
         sys.exit(f"Error creating dataset type object: {e}")
 
-    dataset_path = train_paths.get_text_dataset_path(args.task_id)
+    base_dataset_path = f"{train_cst.CACHE_PATH}/datasets"
+    dataset_path = f"{base_dataset_path}/{args.task_id}_train_data.json" if args.file_format == FileFormat.S3.value else f"{base_dataset_path}/{args.dataset.replace('/', '--')}"
 
     if args.file_format == FileFormat.S3.value and args.task_type == TaskType.DPOTASK.value:
         adapt_columns_for_dpo_dataset(dataset_path, dataset_type, apply_formatting=True)
     elif args.file_format == FileFormat.S3.value and args.task_type == TaskType.GRPOTASK.value:
         adapt_columns_for_grpo_dataset(dataset_path, dataset_type)
 
-    dataset_path = copy_dataset_to_axolotl_directories(dataset_path)
-    submission_dir = train_paths.get_checkpoints_output_path(args.task_id, args.expected_repo_name)
-    if not os.path.exists(submission_dir):
-        os.makedirs(submission_dir, exist_ok=True)
+    dataset_path = copy_dataset_if_needed(dataset_path, args.file_format)
 
-    output_dir = train_paths.get_training_temp_output_path(args.task_id)
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir, exist_ok=True)
+    output_dir = f"/workspace/axolotl/outputs/{args.task_id}/{args.expected_repo_name}"
 
-    print("dataset_path: ", dataset_path, flush=True)
-    print("submission_dir: ", submission_dir, flush=True)
-    print("output_dir: ", output_dir, flush=True)   
-    data_size = get_data_size(dataset_path)
-    
     config_path = create_config(
         args.task_id,
         args.model,
@@ -258,42 +344,13 @@ def main():
         dataset_type,
         args.file_format,
         output_dir,
-        data_size,
-        args.hours_to_complete,
         args.expected_repo_name,
     )
-    
-    original_init = Trainer.__init__
-    # set the value of end_time = current time in UTC + hours_to_complete
-    end_time = datetime.now(timezone.utc) + timedelta(hours=args.hours_to_complete)
-    end_time = end_time.strftime("%Y-%m-%d %H:%M:%S")
-    print("end_time: ", end_time, flush=True)
 
-    def patched_init(self, *args, **kwargs):
-        print("************* patching Trainer.__init__", flush=True)
-        callbacks = kwargs.get("callbacks", [])
-        
-        if original_task_type == TaskType.GRPOTASK.value:
-            when_to_eval_handler = WhenToEvalHandler(end_time, save_before_remaining_time=15)
-            callbacks.append(GRPOCustomEvalSaveCallback(when_to_eval_handler, submission_dir, output_dir, original_model_name))
-        else:
-            when_to_eval_handler = WhenToEvalHandler(end_time, save_before_remaining_time=5)
-            callbacks.append(CustomEvalSaveCallback(when_to_eval_handler, submission_dir, output_dir, original_model_name))
-        kwargs["callbacks"] = callbacks
-        original_init(self, *args, **kwargs)
+    run_training(config_path)
 
-    Trainer.__init__ = patched_init
-    
-    print("config_path: ", config_path, flush=True)
-    
-    # Load the config and call training directly instead of using CLI
-    from axolotl.cli.train import do_cli
-    
-    # Call training directly (this will use the patched Trainer.__init__)
-    do_cli(config=config_path)
-    
-    # patch_model_metadata(output_dir, args.model)
+    patch_model_metadata(output_dir, args.model)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
