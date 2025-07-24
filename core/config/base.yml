@@ -43,7 +43,7 @@ gradient_checkpointing: false
 early_stopping_patience:
 resume_from_checkpoint:
 local_rank:
-logging_steps: 1
+logging_steps: 10
 xformers_attention:
 flash_attention: true
 s2_attention:

@@ -978,3 +978,37 @@ async def get_latest_tournament_with_created_at(psql_db: PSQLDB, tournament_type
             created_at = result[cst.CREATED_AT]
             return tournament, created_at
         return None, None
+
+
+async def get_tournament_id_by_task_id(task_id: str, psql_db: PSQLDB) -> str | None:
+    """
+    Fetch the tournament_id for a given task_id from the tournament_tasks table.
+
+    Args:
+        task_id: The task ID to look up
+        psql_db: The database connection
+
+    Returns:
+        The tournament_id as a string, or None if not found
+    """
+    async with await psql_db.connection() as connection:
+        query = f"""
+            SELECT {cst.TOURNAMENT_ID}
+            FROM {cst.TOURNAMENT_TASKS_TABLE}
+            WHERE {cst.TASK_ID} = $1
+        """
+        result = await connection.fetchrow(query, task_id)
+        if result:
+            return result[cst.TOURNAMENT_ID]
+        return None
+
+
+async def is_synced_task(task_id: str, psql_db: PSQLDB) -> bool:
+    """Check if a task is a synced task (should not be set to failure during round reversal)."""
+    async with await psql_db.connection() as connection:
+        query = """
+            SELECT 1 FROM boss_round_synced_tasks 
+            WHERE tournament_task_id = $1
+        """
+        result = await connection.fetchval(query, task_id)
+        return result is not None

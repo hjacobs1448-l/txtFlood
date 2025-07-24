@@ -15,6 +15,7 @@ from core.models.tournament_models import TournamentResultsWithWinners
 from core.models.tournament_models import TournamentType
 from core.models.utility_models import TaskType
 from validator.db.sql.auditing import store_latest_scores_url
+
 from validator.db.sql.submissions_and_scoring import get_aggregate_scores_for_leaderboard_since
 from validator.db.sql.submissions_and_scoring import get_aggregate_scores_since
 from validator.db.sql.tournament_performance import get_boss_round_synthetic_task_completion
@@ -25,6 +26,7 @@ from validator.db.sql.tournaments import get_active_tournament_participants
 from validator.db.sql.tournaments import get_latest_completed_tournament
 from validator.db.sql.tournaments import get_tournament_full_results
 from validator.evaluation.tournament_scoring import get_tournament_weights_from_data
+
 
 
 load_dotenv(os.getenv("ENV_FILE", ".vali.env"))
@@ -67,12 +69,15 @@ def get_organic_proportion(task_results: list[TaskResults], task_types: TaskType
     else:
         type_set = {task_types}
 
+
     specific_type_tasks = [i for i in task_results if i.task.created_at > cutoff_date and i.task.task_type in type_set]
+
 
     organic_count = sum(1 for task in specific_type_tasks if task.task.is_organic)
     total_count = len(specific_type_tasks)
 
     logger.info(f"The total count is {total_count} with organic_count {organic_count} for types {type_set}")
+
     organic_proportion = organic_count / total_count if total_count > 0 else 0.0
     logger.info(f"THE ORGANIC PROPORTION RIGHT NOW IS {organic_proportion}")
     return organic_proportion
@@ -172,6 +177,7 @@ def get_period_scores_from_task_results(task_results: list[TaskResults]) -> list
         task_type_list = task_types_raw if isinstance(task_types_raw, set) else [task_types_raw]
 
         task_types_key = str(sorted(task_type_list)) if len(task_type_list) > 1 else str(task_type_list[0])
+
         organic_proportions[task_types_key] = get_organic_proportion(
             task_results, set(task_type_list) if len(task_type_list) > 1 else task_type_list[0], days=7
         )
@@ -179,6 +185,7 @@ def get_period_scores_from_task_results(task_results: list[TaskResults]) -> list
         suspicious_hotkeys[task_types_key] = detect_suspicious_nodes(
             task_results, set(task_type_list) if len(task_type_list) > 1 else task_type_list[0], days=7
         )
+
         logger.info(f"Found {len(suspicious_hotkeys[task_types_key])} suspicious nodes for {task_types_key}")
 
     filtered_tasks = {}
@@ -197,6 +204,7 @@ def get_period_scores_from_task_results(task_results: list[TaskResults]) -> list
 
         filtered_tasks[f"{task_types_key}_organic"] = organic_tasks
         filtered_tasks[f"{task_types_key}_synth"] = synth_tasks
+
 
     periods = {
         "one_day": {"cutoff": datetime.now(timezone.utc) - timedelta(days=1), "weight": cts.ONE_DAY_SCORE_WEIGHT},
@@ -290,7 +298,6 @@ async def _get_leaderboard_data(config: Config) -> tuple[list[PeriodScore], list
 
     return all_period_scores, task_results
 
-
 async def _upload_results_to_s3(
     config: Config, task_results: list[TaskResults], tournament_audit_data: TournamentAuditData
 ) -> None:
@@ -341,12 +348,14 @@ def get_miner_performance_breakdown(hotkey: str, task_results: list[TaskResults]
         task_type_list = raw_types if isinstance(raw_types, set) else [raw_types]
 
         task_types_key = str(sorted(task_type_list)) if len(task_type_list) > 1 else str(task_type_list[0])
+
         organic_proportions[task_types_key] = get_organic_proportion(
             task_results, set(task_type_list) if len(task_type_list) > 1 else task_type_list[0], days=7
         )
         suspicious_hotkeys[task_types_key] = detect_suspicious_nodes(
             task_results, set(task_type_list) if len(task_type_list) > 1 else task_type_list[0], days=7
         )
+
 
     breakdown = {"task_types": {}, "period_totals": {}, "all_scores": []}
 
@@ -371,7 +380,9 @@ def get_miner_performance_breakdown(hotkey: str, task_results: list[TaskResults]
             "task_weight": task_weight,
             "organic_proportion": organic_proportions[task_types_key],
             "is_suspicious": hotkey in suspicious_hotkeys[task_types_key],
+
             "periods": {},
+
         }
 
         for period_name, period_config in periods.items():
@@ -383,6 +394,7 @@ def get_miner_performance_breakdown(hotkey: str, task_results: list[TaskResults]
 
             organic_mult = period_weight * task_weight * organic_proportions[task_types_key]
             synth_mult = period_weight * task_weight * (1 - organic_proportions[task_types_key])
+
 
             organic_scores = (
                 get_period_scores_from_results(period_organic, weight_multiplier=organic_mult) if period_organic else []
@@ -425,6 +437,7 @@ def get_miner_performance_breakdown(hotkey: str, task_results: list[TaskResults]
             total = sum(
                 breakdown["task_types"][tt]["periods"][period_name]["organic"]["weighted_contribution"]
                 + breakdown["task_types"][tt]["periods"][period_name]["synthetic"]["weighted_contribution"]
+
                 for tt in breakdown["task_types"]
             )
             breakdown["period_totals"][period_name] = total
@@ -494,7 +507,7 @@ def calculate_weight_redistribution(performance_diff: float) -> tuple[float, flo
 
     tournament_weight = cts.BASE_TOURNAMENT_WEIGHT - tournament_burn
     regular_weight = cts.BASE_REGULAR_WEIGHT + (tournament_burn * cts.LEGACY_PERFORM_DIFF_EMISSION_GAIN_PERCENT)
-    burn_weight = cts.MIN_BURN_WEIGHT + (tournament_burn * (1 - cts.LEGACY_PERFORM_DIFF_EMISSION_GAIN_PERCENT))
+    burn_weight = (1 - cts.BASE_REGULAR_WEIGHT - cts.BASE_TOURNAMENT_WEIGHT) + (tournament_burn * (1 - cts.LEGACY_PERFORM_DIFF_EMISSION_GAIN_PERCENT))
 
     return tournament_weight, regular_weight, burn_weight
 
@@ -538,10 +551,17 @@ async def get_active_tournament_burn_data(psql_db) -> tuple[float, float, float]
             weighted_performance_diff += performance_diff * weight
             total_weight += weight
         elif latest_tournament:
-            logger.info(
-                f"No synthetic task data available for {tournament_type} tournaments, assuming perfect performance (0% difference)"
-            )
-            weighted_performance_diff += 0.0 * weight
+            # Check if burn account won this tournament
+            if latest_tournament.winner_hotkey == cts.EMISSION_BURN_HOTKEY:
+                logger.info(
+                    f"No synthetic task data available for {tournament_type} tournaments, burn account won - assuming worst performance (100% difference)"
+                )
+                weighted_performance_diff += 1.0 * weight  # Maximum performance difference
+            else:
+                logger.info(
+                    f"No synthetic task data available for {tournament_type} tournaments, assuming perfect performance (0% difference)"
+                )
+                weighted_performance_diff += 0.0 * weight
             total_weight += weight
         else:
             logger.info(f"No {tournament_type} tournament data available, will burn this tournament allocation")
@@ -550,8 +570,8 @@ async def get_active_tournament_burn_data(psql_db) -> tuple[float, float, float]
         logger.info("No tournament data available, burning entire tournament allocation")
         tournament_burn = cts.BASE_TOURNAMENT_WEIGHT
         tournament_weight = 0.0
-        regular_weight = cts.BASE_REGULAR_WEIGHT + (tournament_burn / 2)
-        burn_weight = cts.MIN_BURN_WEIGHT + (tournament_burn / 2)
+        regular_weight = cts.BASE_REGULAR_WEIGHT + (tournament_burn * cts.LEGACY_PERFORM_DIFF_EMISSION_GAIN_PERCENT)
+        burn_weight = (1 - cts.BASE_REGULAR_WEIGHT - cts.BASE_TOURNAMENT_WEIGHT) + (tournament_burn * (1 - cts.LEGACY_PERFORM_DIFF_EMISSION_GAIN_PERCENT))
         return tournament_weight, regular_weight, burn_weight
 
     average_performance_diff = weighted_performance_diff / total_weight
@@ -680,6 +700,7 @@ async def get_node_weights_from_period_scores(
     all_node_ids = [node.node_id for node in all_nodes]
     all_node_weights = [0.0 for _ in all_nodes]
 
+
     logger.info("=== BURN CALCULATION ===")
     tournament_weight_multiplier, regular_weight_multiplier, burn_weight = await get_active_tournament_burn_data(psql_db)
 
@@ -697,6 +718,7 @@ async def get_node_weights_from_period_scores(
     logger.info(
         f"Weight distribution: tournament={tournament_weight_multiplier:.6f}, regular={regular_weight_multiplier:.6f}, burn={burn_weight:.6f}, participation={participation_total:.6f}"
     )
+
 
     logger.info("=== NODE WEIGHT CALCULATIONS ===")
     for node_result in node_results:
@@ -739,6 +761,16 @@ async def get_node_weights_from_period_scores(
         )
 
     tournament_weights = get_tournament_weights_from_data(text_tournament_data, image_tournament_data)
+    
+    # Apply tournament type weights if only one tournament type completed
+    if text_tournament_data and not image_tournament_data:
+        # Only text tournament - scale weights by text proportion
+        tournament_weights = {hotkey: weight * cts.TOURNAMENT_TEXT_WEIGHT for hotkey, weight in tournament_weights.items()}
+        logger.info(f"Only text tournament completed - scaled weights by {cts.TOURNAMENT_TEXT_WEIGHT}")
+    elif image_tournament_data and not text_tournament_data:
+        # Only image tournament - scale weights by image proportion  
+        tournament_weights = {hotkey: weight * cts.TOURNAMENT_IMAGE_WEIGHT for hotkey, weight in tournament_weights.items()}
+        logger.info(f"Only image tournament completed - scaled weights by {cts.TOURNAMENT_IMAGE_WEIGHT}")
 
     logger.info(f"Tournament weights returned: {tournament_weights}")
     logger.info(f"Tournament weights length: {len(tournament_weights)}")
@@ -780,6 +812,7 @@ async def get_node_weights_from_period_scores(
         logger.info(f"Burn Node ID {burn_node_id} (hotkey: {cts.EMISSION_BURN_HOTKEY[:8]}...): burn_weight={burn_weight:.6f}")
     else:
         logger.warning(f"Burn hotkey {cts.EMISSION_BURN_HOTKEY} not found in network nodes")
+
 
     logger.info("=== FINAL NODE WEIGHTS ===")
     for node_id, weight in enumerate(all_node_weights):

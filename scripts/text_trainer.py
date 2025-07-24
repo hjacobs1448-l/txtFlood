@@ -11,7 +11,6 @@ import shutil
 import subprocess
 import sys
 import uuid
-import re
 import yaml
 from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM
@@ -34,6 +33,50 @@ from core.models.utility_models import InstructTextDatasetType
 from core.models.utility_models import TaskType
 from miner.logic.job_handler import create_reward_funcs_file
 
+import requests
+import re
+KNOWN_MODEL_PARAMS = {
+    "tinyllama_v1.1": 1_100_000_000,
+}
+
+def parse_param_count_from_name(model_name: str) -> int:
+    if not isinstance(model_name, str):
+        return 0
+
+    for k, v in KNOWN_MODEL_PARAMS.items():
+        if k.lower() in model_name.lower():
+          return v
+
+    m = re.search(r'(?i)(\d+(?:\.\d+)?)\s*([mMbB])\b', model_name)
+    if not m:
+        return 0
+
+    number_str, unit = m.group(1), m.group(2).upper()
+    try:
+        number = float(number_str)
+    except ValueError:
+        return 0
+
+    if unit == 'M':
+        return int(number * 1_000_000)
+    elif unit == 'B':
+        return int(number * 1_000_000_000)
+
+    return 0
+
+def get_hf_model_param_count(model_name: str) -> int:
+    api_url = f"https://huggingface.co/api/models/{model_name}"
+    try:
+        resp = requests.get(api_url, timeout=5)
+        resp.raise_for_status()
+        info = resp.json()
+        total = info.get("safetensors", {}).get("total")
+        if isinstance(total, (int, float)):
+            return int(total)
+    except Exception:
+        pass
+
+    return parse_param_count_from_name(model_name)
 
 def patch_model_metadata(output_dir: str, base_model_id: str):
     try:
@@ -95,57 +138,22 @@ def copy_dataset_if_needed(dataset_path, file_format):
     return dataset_path
 
 
+import torch
+
 def get_gpu_count():
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, check=True
-        )
-        gpus = result.stdout.strip().split('\n')
-        return len(gpus)
-    except Exception as e:
-        return 0
+    return torch.cuda.device_count()
 
-
-KNOWN_MODEL_PARAMS = {
-    "tinyllama_v1.1": 1_100_000_000,
-}
-
-def parse_param_count_from_name(model_name: str):
-    if not isinstance(model_name, str):
-        return None
-
-    for key, val in KNOWN_MODEL_PARAMS.items():
-        if key.lower() in model_name.lower():
-            return val
-
-    m = re.search(r'(?i)(\d+(?:\.\d+)?)\s*([mMbB])\b', model_name)
-    if not m:
-        return None
-
-    number_str, unit = m.group(1), m.group(2).upper()
-    try:
-        number = float(number_str)
-    except ValueError:
-        return None
-
-    if unit.lower() == 'm':
-        return int(number * 1_000_000)
-    elif unit.lower() == 'b':
-        return int(number * 1_000_000_000)
-    else:
-        return None
 
 def get_batch_size_by_model_size(model_name: str) -> int:
-    count = parse_param_count_from_name(model_name)
-    if count == None:
-        return None
+    count = get_hf_model_param_count(model_name)
+    if count == 0:
+        return 0
 
     params_in_billion = count / 1_000_000_000
     if params_in_billion <= 0.5:
-        base_batch_size = 16
+        base_batch_size = 32
     elif params_in_billion <= 1.6:
-        base_batch_size = 12
+        base_batch_size = 16
     elif params_in_billion <= 7.1:
         base_batch_size = 8
     elif params_in_billion <= 9.1:
@@ -176,13 +184,7 @@ def get_learning_rate_by_batch_and_gpu(batch_size: int, gpu_count: int, base_lea
 def create_config(task_id, model, dataset, dataset_type, file_format, output_dir, expected_repo_name=None,
                 huggingface_username=None, huggingface_token=None, disable_upload=True):
     """Create the axolotl config file with appropriate settings."""
-    if isinstance(dataset_type, InstructTextDatasetType | DpoDatasetType):
-        config_path = "/workspace/axolotl/base.yml"
-    elif isinstance(dataset_type, GrpoDatasetType):
-        config_path = "/workspace/axolotl/base_grpo.yml"
-    else:
-        raise ValueError(f"Unsupported dataset type: {type(dataset_type)}")
-
+    config_path = "/workspace/axolotl/base.yml"
     with open(config_path, "r") as file:
         config = yaml.safe_load(file)
 
@@ -198,6 +200,14 @@ def create_config(task_id, model, dataset, dataset_type, file_format, output_dir
     if isinstance(dataset_type, DpoDatasetType):
         config["rl"] = "dpo"
     elif isinstance(dataset_type, GrpoDatasetType):
+        config["save_steps"] = 20
+        config["rl"] = "grpo"
+        config["trl"] = {
+            "beta": 0.04,
+            "max_completion_length": 256,
+            "use_vllm": False,
+            "num_generations": 2,
+        }
         filename, reward_funcs_names = create_reward_funcs_file(
             [reward_function.reward_func for reward_function in dataset_type.reward_functions],
             task_id,
