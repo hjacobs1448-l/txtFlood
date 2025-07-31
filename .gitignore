@@ -20,7 +20,6 @@ postgres_data
 
 postgres_data*
 postgres_data/*
-secure_data/*
 
 todo.md
 core/custom_task_config.py

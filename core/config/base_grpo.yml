@@ -35,7 +35,7 @@ lora_fan_in_fan_out:
 
 gradient_accumulation_steps: 4
 micro_batch_size: 4
-num_epochs: 1
+num_epochs: 3
 optimizer: adamw_bnb_8bit
 lr_scheduler: cosine
 learning_rate: 0.0002
@@ -57,22 +57,14 @@ s2_attention:
 
 wandb_project: Gradients-On-Demand
 wandb_entity:
-wandb_mode: online
+wandb_mode: offline
 wandb_run: your_name
 wandb_runid: default
 
-hub_model_id:
-hub_repo:
-hub_strategy: checkpoint
-hub_token:
-
-
-saves_per_epoch: 4
+saves_per_epoch: 1
 warmup_steps: 10
-evals_per_epoch: 4
 eval_table_size:
 eval_max_new_tokens: 128
-max_steps: 10
 debug:
 deepspeed:
 weight_decay: 0.0
