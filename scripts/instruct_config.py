@@ -12,18 +12,18 @@ MODEL_CONFIG = {
 
 INSTRUCT_CONFIG = {
     "0_1_b": {
-        "lr": 0.0001,
+        "lr": 0.00015,
         "distributed": "ddp",
         "gpu_count": 1,
-        "batch_size": 140,
+        "batch_size": 100,
         "use_lora": False
     },
     "1_2_b": {
-        "lr": 0.0001,
+        "lr": 0.00015,
         "distributed": "ddp",
         "gpu_count": 1,
         "use_lora": False,
-        "batch_size": 100,
+        "batch_size": 80,
     },
     "2_4_b": {
         "lr": 8e-5,
@@ -44,14 +44,14 @@ INSTRUCT_CONFIG = {
         "batch_size": 30,
     },
     "9_12_b": {
-        "lr": 0.00015,
+        "lr": 0.000155,
         "distributed": "ddp",
         "gpu_count": 2,
         "use_lora": True,
         "batch_size": 32,
     },
     "12_15_b": {
-        "lr": 0.0001,
+        "lr": 0.00015,
         "distributed": "ddp",
         "gpu_count": 4,
         "use_lora": True,
