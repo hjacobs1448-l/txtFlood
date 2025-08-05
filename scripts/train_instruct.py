@@ -42,7 +42,7 @@ class TrainingArguments(transformers.TrainingArguments):
 @dataclass
 class LoraArguments:
     lora_r: int = 128
-    lora_alpha: int = 512
+    lora_alpha: int = 256
     lora_dropout: float = 0.1
     lora_target_modules: str = "all"  # all for all linear; "q_proj v_proj"
     lora_weight_path: str = ""

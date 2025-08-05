@@ -52,10 +52,46 @@ def create_dataset_entry(
 
     return dataset_entry
 
+def update_flash_attention(config: dict, model: str) -> dict:
+    from transformers import AutoConfig
+    import torch
+    import re
+    
+    FLASH_SUPPORTED_ARCHS = {
+        "LlamaForCausalLM",
+        "MistralForCausalLM",
+        "GemmaForCausalLM"
+    }    
+   
+    try:
+        model_config = AutoConfig.from_pretrained(model, trust_remote_code=True)
+        architecture = getattr(model_config, "architectures", [None])[0]
+        
+        if architecture is None:
+            logger.error(f"ne udalos opredelit atchitecturu {model}")
+            config["flash_attention"] = False
+            return config
 
-def update_flash_attention(config: dict, model: str):
-    # You might want to make this model-dependent
-    config["flash_attention"] = False
+        arch_supported = architecture in FLASH_SUPPORTED_ARCHS  
+        flash_supported = all([
+            arch_supported
+        ])
+
+        logger.info(f"proverka Flash Attention for {model}:")
+        logger.info(f"- architecture: {architecture} ({'?' if arch_supported else '?'})")
+        
+        if flash_supported:
+            logger.info("vkuchaem flash attn")
+            config["flash_attention"] = True
+            config["xformers"] = False
+        else:
+            logger.warning("Flash Attention ne supported")
+            config["flash_attention"] = False
+            
+    except Exception as e:
+        logger.error(f"oshibka proverki Flash Attention: {str(e)}", exc_info=True)
+        config["flash_attention"] = False
+    
     return config
 
 
