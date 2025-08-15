@@ -39,7 +39,7 @@ INSTRUCT_CONFIG = {
         "batch_size": 40,
     },
     "5_9_b": {
-        "lr": 3.5e-5,
+        "lr": 5e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 28,

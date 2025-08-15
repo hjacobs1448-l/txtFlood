@@ -4,14 +4,14 @@ from copy import deepcopy
 
 GRPO_CONFIG = {
     "0_1_b": {
-        "lr": 0.00015,
+        "lr": 0.0002,
         "distributed": "ddp",
         "gpu_count": 1,
         "batch_size": 40,
         "vllm_gpu_memory_utilization": 0.4
     },
     "1_2_b": {
-        "lr": 7.5e-5,
+        "lr": 9.9e-5,
         "distributed": "ddp",
         "gpu_count": 1,
         "batch_size": 40,
